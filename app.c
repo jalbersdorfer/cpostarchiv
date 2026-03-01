@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -97,6 +98,7 @@ typedef struct {
 } JsonIn;
 
 static Config g_cfg;
+static int g_debug = 0;
 
 static void response_set_text(Response *r, int status, const char *ctype, const char *text);
 
@@ -131,6 +133,22 @@ static long long now_ms(void) {
 
 static long long now_s(void) {
     return (long long)time(NULL);
+}
+
+static void log_msg(const char *fmt, ...) {
+    if (!g_debug) return;
+    time_t t = time(NULL);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char ts[32];
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
+    fprintf(stderr, "[%s] ", ts);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    fflush(stderr);
 }
 
 static void kvl_init(KVList *l) {
@@ -688,14 +706,17 @@ static int db_connect(mw_conn *c, char *err, size_t err_len) {
 }
 
 static int db_query_rows(const char *sql, mw_result *r, char *err, size_t err_len) {
+    log_msg("db_query_rows: begin sql[%.120s]", sql ? sql : "");
     mw_conn c;
     if (db_connect(&c, err, err_len) != 0) return -1;
     int rc = mw_query(&c, sql, r, err, err_len);
     mw_close(&c);
+    log_msg("db_query_rows: end rc=%d rows=%zu err=%s", rc, (rc == 0 && r) ? r->num_rows : 0, (err && *err) ? err : "");
     return rc;
 }
 
 static int db_exec(const char *sql, uint64_t *affected, char *err, size_t err_len) {
+    log_msg("db_exec: begin sql[%.120s]", sql ? sql : "");
     mw_conn c;
     if (db_connect(&c, err, err_len) != 0) return -1;
     mw_result r;
@@ -703,6 +724,7 @@ static int db_exec(const char *sql, uint64_t *affected, char *err, size_t err_le
     if (rc == 0 && affected) *affected = r.affected_rows;
     mw_result_free(&r);
     mw_close(&c);
+    log_msg("db_exec: end rc=%d affected=%llu err=%s", rc, (unsigned long long)(affected ? *affected : 0), (err && *err) ? err : "");
     return rc;
 }
 
@@ -1023,22 +1045,29 @@ static int path_is_safe_rel(const char *p) {
 }
 
 static int req_read_all(int fd, unsigned char *buf, size_t n) {
+    log_msg("req_read_all: want=%zu", n);
     size_t off = 0;
     while (off < n) {
         ssize_t r = recv(fd, buf + off, n - off, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
+            log_msg("req_read_all: recv error off=%zu errno=%d (%s)", off, errno, strerror(errno));
             return -1;
         }
-        if (r == 0) return -1;
+        if (r == 0) {
+            log_msg("req_read_all: peer closed off=%zu", off);
+            return -1;
+        }
         off += (size_t)r;
     }
+    log_msg("req_read_all: done=%zu", off);
     return 0;
 }
 
 static int read_request(int fd, Request *req) {
     memset(req, 0, sizeof(*req));
     req->fd = fd;
+    log_msg("read_request: begin fd=%d", fd);
 
     size_t cap = 8192;
     unsigned char *buf = malloc(cap);
@@ -1057,10 +1086,12 @@ static int read_request(int fd, Request *req) {
         ssize_t r = recv(fd, buf + len, cap - len, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
+            log_msg("read_request: header recv error errno=%d (%s)", errno, strerror(errno));
             free(buf);
             return -1;
         }
         if (r == 0) {
+            log_msg("read_request: header peer closed");
             free(buf);
             return -1;
         }
@@ -1073,15 +1104,25 @@ static int read_request(int fd, Request *req) {
         }
     }
 
-    char *headers = strndup((char *)buf, header_end + 1);
-    if (!headers) { free(buf); return -1; }
+    char *headers = strndup((char *)buf, header_end);
+    if (!headers) {
+        log_msg("read_request: OOM for headers");
+        free(buf);
+        return -1;
+    }
 
     char *save = NULL;
     char *line = strtok_r(headers, "\r\n", &save);
-    if (!line) { free(headers); free(buf); return -1; }
+    if (!line) {
+        log_msg("read_request: empty request line");
+        free(headers);
+        free(buf);
+        return -1;
+    }
 
     char url[4096] = {0};
     if (sscanf(line, "%7s %4095s", req->method, url) != 2) {
+        log_msg("read_request: bad request line '%s'", line);
         free(headers); free(buf); return -1;
     }
     char *q = strchr(url, '?');
@@ -1106,8 +1147,11 @@ static int read_request(int fd, Request *req) {
         }
     }
 
-    size_t have_body = len - (header_end + 1);
+    size_t have_body = len - header_end;
+    log_msg("read_request: method=%s path=%s content_length=%zu have_body=%zu ctype=%s",
+            req->method, req->path, req->content_length, have_body, req->content_type);
     if (req->content_length > 64 * 1024 * 1024) {
+        log_msg("read_request: payload too large");
         free(headers); free(buf);
         return -2;
     }
@@ -1118,9 +1162,10 @@ static int read_request(int fd, Request *req) {
 
         size_t copy = have_body;
         if (copy > req->content_length) copy = req->content_length;
-        memcpy(req->body, buf + header_end + 1, copy);
+        memcpy(req->body, buf + header_end, copy);
         if (copy < req->content_length) {
             if (req_read_all(fd, req->body + copy, req->content_length - copy) != 0) {
+                log_msg("read_request: body read failed copy=%zu need=%zu", copy, req->content_length);
                 free(headers); free(buf); free(req->body); req->body = NULL;
                 return -1;
             }
@@ -1130,6 +1175,7 @@ static int read_request(int fd, Request *req) {
 
     free(headers);
     free(buf);
+    log_msg("read_request: done method=%s path=%s", req->method, req->path);
     return 0;
 }
 
@@ -1581,9 +1627,11 @@ static char *load_doc_content_from_txt_by_title(const char *title) {
     unsigned char *buf = NULL;
     size_t len = 0;
     if (read_file_all(txtpath, &buf, &len) != 0) {
+        log_msg("load_doc_content_from_txt_by_title: read failed path=%s errno=%d (%s)", txtpath, errno, strerror(errno));
         free(txtpath);
         return strdup("");
     }
+    log_msg("load_doc_content_from_txt_by_title: read ok path=%s len=%zu", txtpath, len);
     free(txtpath);
     char *out = malloc(len + 1);
     if (!out) {
@@ -1733,8 +1781,10 @@ static void handle_file_tags_get(long long id, Response *resp) {
 }
 
 static void handle_file_tag_adddel(long long id, const Request *req, Response *resp, int add_mode) {
+    log_msg("tag_route: begin id=%lld mode=%s", id, add_mode ? "add" : "remove");
     KVList form;
     if (parse_body_form(req, &form) != 0) {
+        log_msg("tag_route: parse_body_form failed");
         response_set_text(resp, 400, "text/plain; charset=utf-8", "Bad form body");
         return;
     }
@@ -1742,36 +1792,49 @@ static void handle_file_tag_adddel(long long id, const Request *req, Response *r
     char *tag = tagv ? trim_dup(tagv) : NULL;
     kvl_free(&form);
     if (!tag || !*tag || contains_ws(tag)) {
+        log_msg("tag_route: invalid tag input");
         free(tag);
         response_set_text(resp, 400, "text/plain; charset=utf-8", "Invalid tag");
         return;
     }
+    log_msg("tag_route: tag='%s'", tag);
 
     char err[512] = {0};
     char *title = NULL;
     int frc = fetch_doc_title_by_id(id, &title, err, sizeof(err));
     if (frc == 1) {
+        log_msg("tag_route: doc not found id=%lld", id);
         free(tag);
         response_set_text(resp, 404, "text/plain; charset=utf-8", "Not found");
         return;
     }
     if (frc != 0) {
+        log_msg("tag_route: fetch_doc_title_by_id failed err=%s", err);
         free(tag);
         char msg[768];
         snprintf(msg, sizeof(msg), "DB error: %s", err);
         response_set_text(resp, 500, "text/plain; charset=utf-8", msg);
         return;
     }
+    log_msg("tag_route: title='%s'", title);
 
     char *pdf_path = path_join2(g_cfg.home, title);
     if (!pdf_path) {
+        log_msg("tag_route: path_join2 OOM");
         free(tag); free(title);
         response_set_text(resp, 500, "text/plain; charset=utf-8", "OOM");
         return;
     }
+    log_msg("tag_route: pdf_path='%s'", pdf_path);
 
     TagList tl;
-    read_tags_file(pdf_path, &tl);
+    if (read_tags_file(pdf_path, &tl) != 0) {
+        log_msg("tag_route: read_tags_file failed path=%s", pdf_path);
+        free(tag); free(title); free(pdf_path);
+        response_set_text(resp, 500, "text/plain; charset=utf-8", "Failed reading tags file");
+        return;
+    }
+    log_msg("tag_route: current_tags=%zu", tl.len);
 
     if (add_mode) {
         int exists = 0;
@@ -1781,7 +1844,12 @@ static void handle_file_tag_adddel(long long id, const Request *req, Response *r
                 break;
             }
         }
-        if (!exists) taglist_add(&tl, tag, now_s(), 0, 0);
+        if (!exists && taglist_add(&tl, tag, now_s(), 0, 0) != 0) {
+            log_msg("tag_route: taglist_add failed");
+            free(tag); free(title); free(pdf_path); taglist_free(&tl);
+            response_set_text(resp, 500, "text/plain; charset=utf-8", "Out of memory adding tag");
+            return;
+        }
     } else {
         long long n = now_s();
         for (size_t i = 0; i < tl.len; i++) {
@@ -1792,27 +1860,38 @@ static void handle_file_tag_adddel(long long id, const Request *req, Response *r
         }
     }
 
-    write_tags_file(pdf_path, &tl);
+    if (write_tags_file(pdf_path, &tl) != 0) {
+        log_msg("tag_route: write_tags_file failed path=%s errno=%d (%s)", pdf_path, errno, strerror(errno));
+        free(tag); free(title); free(pdf_path); taglist_free(&tl);
+        response_set_text(resp, 500, "text/plain; charset=utf-8", "Failed writing tags file (permissions/path?)");
+        return;
+    }
+    log_msg("tag_route: write_tags_file ok");
     free(pdf_path);
 
     char *active = active_tags_str(&tl);
     if (!active) active = strdup("");
+    log_msg("tag_route: active_tags='%s'", active ? active : "");
 
     char *content = load_doc_content_from_txt_by_title(title);
     if (!content) content = strdup("");
     if (!content) {
+        log_msg("tag_route: content load OOM");
         free(tag); free(title); free(active); taglist_free(&tl);
         response_set_text(resp, 500, "text/plain; charset=utf-8", "OOM");
         return;
     }
+    log_msg("tag_route: content_len=%zu", strlen(content));
 
     if (delete_doc_row(id, err, sizeof(err)) != 0 || insert_doc_row(id, title, content, active, err, sizeof(err)) != 0) {
+        log_msg("tag_route: db update failed err=%s", err);
         free(tag); free(title); free(content); free(active); taglist_free(&tl);
         char msg[768];
         snprintf(msg, sizeof(msg), "DB update failed: %s", err);
         response_set_text(resp, 500, "text/plain; charset=utf-8", msg);
         return;
     }
+    log_msg("tag_route: db update ok");
 
     if (add_mode) {
         char *je = json_escape(active);
@@ -1829,6 +1908,7 @@ static void handle_file_tag_adddel(long long id, const Request *req, Response *r
     free(content);
     free(active);
     taglist_free(&tl);
+    log_msg("tag_route: done id=%lld", id);
 }
 
 static void handle_file_delete(long long id, Response *resp) {
@@ -1883,8 +1963,10 @@ static void handle_file_put_date(long long old_id, const Request *req, Response 
         return;
     }
     const char *d = kvl_get(&form, "date");
+    char *date_str = d ? strdup(d) : NULL;
     int y = 0, m = 0, day = 0;
-    if (!d || sscanf(d, "%4d-%2d-%2d", &y, &m, &day) != 3) {
+    if (!date_str || sscanf(date_str, "%4d-%2d-%2d", &y, &m, &day) != 3) {
+        free(date_str);
         kvl_free(&form);
         response_set_text(resp, 400, "text/plain; charset=utf-8", "Invalid date");
         return;
@@ -1907,13 +1989,14 @@ static void handle_file_put_date(long long old_id, const Request *req, Response 
 
     char *txtpath = path_join3(g_cfg.home, title, ".txt");
     if (txtpath) {
-        append_date_header_txt(txtpath, d);
+        append_date_header_txt(txtpath, date_str);
         free(txtpath);
     }
 
     long long new_id = 0;
     if (find_free_id_for_date(y, m, day, &new_id, err, sizeof(err)) != 0) {
         free(title); free(tags);
+        free(date_str);
         char msg[768];
         snprintf(msg, sizeof(msg), "ID selection failed: %s", err);
         response_set_text(resp, 500, "text/plain; charset=utf-8", msg);
@@ -1928,6 +2011,7 @@ static void handle_file_put_date(long long old_id, const Request *req, Response 
 
     if (delete_doc_row(old_id, err, sizeof(err)) != 0 || insert_doc_row(new_id, title, clean_content, tags, err, sizeof(err)) != 0) {
         free(title); free(tags); free(clean_content);
+        free(date_str);
         char msg[768];
         snprintf(msg, sizeof(msg), "Update failed: %s", err);
         response_set_text(resp, 500, "text/plain; charset=utf-8", msg);
@@ -1939,6 +2023,7 @@ static void handle_file_put_date(long long old_id, const Request *req, Response 
     response_set_text(resp, 200, "application/json; charset=utf-8", out);
 
     free(title); free(tags); free(clean_content);
+    free(date_str);
 }
 
 static void handle_static_file(const char *rel, Response *resp) {
@@ -2086,6 +2171,8 @@ static int create_listener(const char *host, int port) {
 }
 
 int main(void) {
+    signal(SIGPIPE, SIG_IGN);
+
     g_cfg.sphinx_host = envs("SPHINX_HOST", "127.0.0.1");
     g_cfg.sphinx_port = (uint16_t)envi("SPHINX_PORT", 9306);
     g_cfg.home = envs("ELDOAR_HOME", "/app");
@@ -2098,6 +2185,7 @@ int main(void) {
     g_cfg.db_user = envs("DB_USER", "");
     g_cfg.db_password = envs("DB_PASSWORD", "");
     g_cfg.db_name = envs("DB_NAME", "");
+    g_debug = envi("DEBUG", 1);
 
     int lfd = create_listener(g_cfg.listen_host, g_cfg.listen_port);
     if (lfd < 0) die("failed to listen on %s:%d", g_cfg.listen_host, g_cfg.listen_port);
@@ -2111,8 +2199,16 @@ int main(void) {
         int cfd = accept(lfd, (struct sockaddr *)&cli, &cl);
         if (cfd < 0) {
             if (errno == EINTR) continue;
+            log_msg("accept failed errno=%d (%s)", errno, strerror(errno));
             continue;
         }
+        log_msg("accept ok fd=%d", cfd);
+
+        struct timeval tv;
+        tv.tv_sec = 20;
+        tv.tv_usec = 0;
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         Request req;
         Response resp;
@@ -2120,6 +2216,7 @@ int main(void) {
 
         int rr = read_request(cfd, &req);
         if (rr == -2) {
+            log_msg("request rejected: payload too large");
             response_set_text(&resp, 413, "text/plain; charset=utf-8", "Payload too large");
             send_response(cfd, &resp, NULL);
             free(resp.body);
@@ -2127,6 +2224,7 @@ int main(void) {
             continue;
         }
         if (rr != 0) {
+            log_msg("request rejected: bad request/read timeout");
             response_set_text(&resp, 400, "text/plain; charset=utf-8", "Bad request");
             send_response(cfd, &resp, NULL);
             free(resp.body);
@@ -2135,6 +2233,7 @@ int main(void) {
         }
 
         char extra[256];
+        log_msg("request: %s %s", req.method, req.path);
         route_request(&req, &resp, extra, sizeof(extra));
         send_response(cfd, &resp, extra[0] ? extra : NULL);
 

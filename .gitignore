@@ -1,0 +1,11 @@
+# Build artifacts
+*.o
+postarchiv
+mysql_probe
+
+# Local runtime/output
+*.log
+
+# Local links to external project data/assets
+data/
+public/
