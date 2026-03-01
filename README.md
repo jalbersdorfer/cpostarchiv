@@ -8,6 +8,37 @@ Includes:
 - minimal MySQL protocol implementation (`mysql_native_password`, `COM_QUERY`, text result sets)
 - file/tag logic compatible with `.tags` JSON files
 
+## KSP / Ops Profile
+
+- Single primary executable: `postarchiv` (`75,144` bytes in current x86_64 build; ~`74K`)
+- Helper executable: `mysql_probe` (`25,840` bytes; ~`26K`)
+- Minimal runtime link set: `libc` + Linux loader only (`ldd postarchiv`)
+- No third-party C libraries and no MySQL client library dependency
+- Batteries included in-tree:
+  - MySQL wire protocol client (`mysql_wire.*`)
+  - Template engine (`template_engine.*`)
+  - HTTP server and routing in `app.c`
+- No language runtime needed (no Perl/Python/Node runtime for the server process)
+- Build output is a single deployable server binary (`./postarchiv`) plus editable `views/*.html`
+
+## Runtime Dependencies
+
+The C server is dependency-light, but feature-complete operation still relies on external tools/services:
+
+- Manticore/Sphinx SQL endpoint (`SPHINX_HOST`/`SPHINX_PORT`)
+- `pdf2txt` for text extraction
+- `ocrmypdf` as OCR fallback for low-text PDFs
+- ImageMagick `convert` for `.jpg` preview generation
+- `perl reindex.pl` for admin-triggered reindex
+
+## RAM Notes
+
+- Core server process itself is lightweight (small binary, blocking single-process model).
+- Real memory pressure is dominated by external subprocesses (`ocrmypdf`, `convert`, `pdf2txt`) during uploads/reprocessing.
+- Practical sizing:
+  - For serving/search/tagging only: low-memory environments are fine.
+  - For OCR-heavy uploads: provision significantly more RAM headroom for worker tools.
+
 ## Build
 
 ```bash
