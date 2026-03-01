@@ -1,0 +1,208 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ELDOAR Search</title>
+  <link href="/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .tag-badge { display:inline-flex; align-items:center; gap:3px; background:#e9ecef; border-radius:4px; padding:1px 6px; font-size:.75rem; }
+    .tag-remove { border:none; background:none; opacity:.6; }
+    .tag-remove:hover { opacity:1; }
+    .tag-stamp { background:none; border:1px solid #6c757d; border-radius:4px; padding:1px 8px; font-size:.75rem; }
+    .tag-stamp.active { display:none; }
+    .tag-add-input { font-size:.75rem; border:1px solid #ced4da; border-radius:4px; padding:1px 6px; width:90px; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="navbar navbar-dark bg-dark shadow-sm">
+    <div class="container">
+      <a href="/" class="navbar-brand"><strong>ELDOAR</strong></a>
+      <a class="btn btn-sm btn-outline-light" href="/admin">Admin</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="py-4 text-center container">
+    <div class="row">
+      <div class="col-lg-8 mx-auto">
+        <h2>Electronic Document Archive</h2>
+        <form method="get" action="/">
+          <input id="search" class="form-control" name="search" value="{{QUERY}}" autofocus>
+          <button class="btn btn-primary mt-2">Suche</button>
+        </form>
+        <a href="/upload" class="btn btn-secondary mt-2">Upload</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="album py-4 bg-light">
+    <div class="container">
+      <div class="alert alert-success">{{RESULT_COUNT}} Ergebnisse ({{SEARCH_LABEL}})</div>
+      <div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3">
+        {{DOCS_HTML}}
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="/js/bootstrap.min.js"></script>
+<script>
+function idToDate(id){ return new Date(parseInt(id)).toISOString().slice(0,10); }
+const _dt = new Map();
+
+function MyDelete(id, btn){
+  if(btn.dataset.c === '1'){
+    clearTimeout(_dt.get(id));
+    fetch('/file/' + id, {method:'DELETE'}).then(() => btn.closest('.col').remove());
+  } else {
+    btn.dataset.c = '1';
+    btn.classList.remove('btn-outline-secondary');
+    btn.classList.add('btn-danger');
+    btn.textContent = 'Delete?';
+    _dt.set(id, setTimeout(() => {
+      btn.dataset.c = '0';
+      btn.classList.remove('btn-danger');
+      btn.classList.add('btn-outline-secondary');
+      btn.textContent = 'Delete';
+    }, 3000));
+  }
+}
+
+function searchTag(tag){
+  var c = document.getElementById('search').value.trim();
+  var q = c ? c + ' @tags ' + tag : '@tags ' + tag;
+  location = '/?search=' + encodeURIComponent(q);
+}
+
+function showTagInput(btn){
+  var c = btn.closest('[data-tag-container]');
+  btn.style.display = 'none';
+  var i = c.querySelector('[data-tag-input]');
+  i.style.display = '';
+  i.focus();
+  i.onblur = function(){
+    var t = i.value.trim();
+    i.value = '';
+    i.style.display = 'none';
+    btn.style.display = '';
+    if(t) addTag(btn.closest('[data-doc-id]').dataset.docId, t, c);
+  };
+  i.onkeydown = function(e){
+    if(e.key === 'Enter') i.blur();
+    if(e.key === 'Escape'){ i.value = ''; i.blur(); }
+  };
+}
+
+function addTag(id, tag, c){
+  fetch('/file/' + id + '/tag', {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'tag=' + encodeURIComponent(tag)
+  }).then(r => { if(r.ok) refreshTagBadges(id, c); });
+}
+
+function removeTag(id, tag, btn){
+  var c = btn.closest('[data-tag-container]');
+  fetch('/file/' + id + '/tag', {
+    method:'DELETE',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'tag=' + encodeURIComponent(tag)
+  }).then(r => { if(r.ok) refreshTagBadges(id, c); });
+}
+
+function refreshTagBadges(id, c){
+  fetch('/file/' + id + '/tags').then(r => r.json()).then(tags => {
+    var a = tags.filter(t => !t.removed).sort((x,y)=>x.tag.localeCompare(y.tag));
+    var ba = c.querySelector('.d-flex.flex-wrap');
+    ba.querySelectorAll('.tag-badge:not([data-tag-add-btn])').forEach(b => b.remove());
+    var inp = ba.querySelector('[data-tag-input]');
+    var fs = ba.querySelector('.tag-stamp');
+    var anchor = fs || inp;
+    a.forEach(t => {
+      var s = document.createElement('span');
+      s.className = 'tag-badge';
+      s.innerHTML = '<span onclick="searchTag(\'' + t.tag + '\')" style="cursor:pointer">' + t.tag + '</span>' +
+                    '<button class="tag-remove" onclick="removeTag(\'' + id + '\',\'' + t.tag + '\',this);event.stopPropagation();">&#215;</button>';
+      ba.insertBefore(s, anchor);
+    });
+    var aset = {};
+    a.forEach(t => aset[t.tag] = true);
+    c.querySelectorAll('.tag-stamp').forEach(b => b.classList.toggle('active', !!aset[b.dataset.stampTag]));
+  });
+}
+
+function applyStamp(id, tag, btn){
+  if(btn.classList.contains('active')) return;
+  addTag(id, tag, btn.closest('[data-tag-container]'));
+}
+
+function toggleHistory(id, btn){
+  var p = btn.nextElementSibling;
+  if(p.style.display !== 'none'){
+    p.style.display = 'none';
+    return;
+  }
+  fetch('/file/' + id + '/tags').then(r => r.json()).then(tags => {
+    p.innerHTML = tags.map(t => {
+      var a = new Date(t.added * 1000).toISOString().slice(0,10);
+      var rm = t.removed ? new Date(t.removed * 1000).toISOString().slice(0,10) : null;
+      return rm ? ('<span style="text-decoration:line-through">' + t.tag + '</span> added ' + a + ', removed ' + rm)
+                : ('<b>' + t.tag + '</b> added ' + a);
+    }).join('<br>') || 'No tag history.';
+    p.style.display = '';
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.doc-date').forEach(span => {
+    span.textContent = idToDate(span.dataset.id);
+    span.addEventListener('click', () => {
+      var col = span.closest('[data-doc-id]');
+      var cur = span.textContent;
+      var input = document.createElement('input');
+      input.type = 'date';
+      input.value = cur;
+      span.replaceWith(input);
+      input.focus();
+
+      function save(){
+        var nd = input.value;
+        if(!nd || nd === cur){ input.replaceWith(span); return; }
+        var id = span.dataset.id;
+        fetch('/file/' + id, {
+          method:'PUT',
+          headers:{'Content-Type':'application/x-www-form-urlencoded'},
+          body:'date=' + encodeURIComponent(nd)
+        }).then(async r => {
+          if(r.ok){
+            var j = await r.json();
+            span.dataset.id = j.new_id;
+            col.dataset.docId = j.new_id;
+            span.textContent = nd;
+          } else {
+            span.textContent = cur;
+          }
+          input.replaceWith(span);
+        });
+      }
+
+      input.addEventListener('blur', save);
+      input.addEventListener('keydown', e => {
+        if(e.key === 'Enter') input.blur();
+        if(e.key === 'Escape') input.replaceWith(span);
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-tag-container]').forEach(c => {
+    var a = {};
+    c.querySelectorAll('.tag-badge:not([data-tag-add-btn]) span').forEach(s => a[s.textContent.trim()] = true);
+    c.querySelectorAll('.tag-stamp').forEach(b => b.classList.toggle('active', !!a[b.dataset.stampTag]));
+  });
+});
+</script>
+</body>
+</html>

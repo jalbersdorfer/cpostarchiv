@@ -1,11 +1,12 @@
-# Minimal MySQL Wire Client (No External C Dependencies)
+# postarchiv-c
 
-This implements only the subset needed for your app:
+Dependency-free C rewrite of the Perl Dancer app, using an in-project minimal MySQL wire client (no MySQL library).
 
-- TCP connect
-- MySQL protocol handshake/auth (`mysql_native_password`)
-- `COM_QUERY`
-- parse `OK`, `ERR`, and text result sets
+Includes:
+
+- HTTP server and route handlers for search/upload/file/tag/admin flows
+- minimal MySQL protocol implementation (`mysql_native_password`, `COM_QUERY`, text result sets)
+- file/tag logic compatible with `.tags` JSON files
 
 ## Build
 
@@ -13,7 +14,57 @@ This implements only the subset needed for your app:
 make
 ```
 
-## Quick Probe
+## Run Server
+
+```bash
+HOST=0.0.0.0 \
+PORT=3000 \
+ELDOAR_HOME=/path/to/postarchiv \
+SPHINX_HOST=127.0.0.1 \
+SPHINX_PORT=9306 \
+OVERVIEW_LIMIT=18 \
+OVERVIEW_ORDER=DESC \
+ELDOAR_STAMPS="todo,done" \
+TEMPLATE_DIR=./views \
+./postarchiv
+```
+
+Then open `http://127.0.0.1:3000/`.
+
+## Implemented Routes
+
+- `GET /`
+- `GET /upload`
+- `POST /upload`
+- `GET /file/**`
+- `DELETE /file/:id`
+- `PUT /file/:id`
+- `GET /file/:id/tags`
+- `POST /file/:id/tag`
+- `DELETE /file/:id/tag`
+- `GET /admin`
+- `POST /admin/reindex`
+- `GET /css/*`, `GET /js/*` from `$ELDOAR_HOME/public`
+
+## Templates
+
+HTML is file-based and loaded from `TEMPLATE_DIR` (default `./views`):
+
+- `views/index.html`
+- `views/upload.html`
+- `views/admin.html`
+
+Template engine implementation is isolated from the app server:
+
+- `template_engine.h`
+- `template_engine.c`
+
+Template placeholders use `{{NAME}}`:
+
+- `index.html`: `{{QUERY}}`, `{{RESULT_COUNT}}`, `{{SEARCH_LABEL}}`, `{{DOCS_HTML}}`
+- `admin.html`: `{{DOC_COUNT}}`
+
+## MySQL Probe (standalone)
 
 ```bash
 ./mysql_probe 127.0.0.1 9306 "" "" "SELECT * FROM testrt ORDER BY id DESC LIMIT 3"
