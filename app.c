@@ -447,6 +447,25 @@ static int render_template(const char *name, const KVList *vars, Response *resp)
     return 0;
 }
 
+static char *render_template_string(const char *name, const KVList *vars) {
+    const char **keys = calloc(vars->len, sizeof(char *));
+    const char **vals = calloc(vars->len, sizeof(char *));
+    if (!keys || !vals) {
+        free(keys);
+        free(vals);
+        return NULL;
+    }
+    for (size_t i = 0; i < vars->len; i++) {
+        keys[i] = vars->items[i].name;
+        vals[i] = vars->items[i].value ? vars->items[i].value : "";
+    }
+    char terr[256];
+    char *html = tpl_render_file(g_cfg.template_dir, name, keys, vals, vars->len, terr, sizeof(terr));
+    free(keys);
+    free(vals);
+    return html;
+}
+
 static void taglist_init(TagList *t) { memset(t, 0, sizeof(*t)); }
 
 static void taglist_free(TagList *t) {
@@ -1037,6 +1056,21 @@ static const char *guess_ctype(const char *path) {
     return "application/octet-stream";
 }
 
+static int ends_with(const char *s, const char *suffix) {
+    size_t sn = strlen(s);
+    size_t xn = strlen(suffix);
+    if (xn > sn) return 0;
+    return memcmp(s + sn - xn, suffix, xn) == 0;
+}
+
+static void set_cache_headers_for_path(const char *path, char *out, size_t outn) {
+    out[0] = 0;
+    if (!path) return;
+    if (ends_with(path, ".pdf.jpg") || ends_with(path, ".js") || ends_with(path, ".css")) {
+        snprintf(out, outn, "Cache-Control: public, max-age=604800, immutable\r\n");
+    }
+}
+
 static int path_is_safe_rel(const char *p) {
     if (!p || !*p) return 0;
     if (p[0] == '/') return 0;
@@ -1283,6 +1317,22 @@ static void free_str_array(char **arr, size_t n) {
     free(arr);
 }
 
+static void sb_append_str(char **buf, size_t *len, size_t *cap, const char *s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    if (*len + n + 1 > *cap) {
+        size_t nc = *cap ? *cap : 1024;
+        while (*len + n + 1 > nc) nc *= 2;
+        char *nb = realloc(*buf, nc);
+        if (!nb) return;
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = 0;
+}
+
 static char *build_docs_html(const DocList *docs) {
     char **stamps = NULL;
     size_t stamps_n = 0;
@@ -1293,44 +1343,63 @@ static char *build_docs_html(const DocList *docs) {
 
     for (size_t i = 0; i < docs->len; i++) {
         const Doc *d = &docs->items[i];
+        char id_buf[64];
+        snprintf(id_buf, sizeof(id_buf), "%lld", d->id);
         char *t = html_escape(d->title);
-        sb_appendf(&buf, &len, &cap,
-            "<div class='col' data-doc-id='%lld'><div class='card shadow-sm'>"
-            "<a href='/file/%s'><img src='/file/%s.jpg' width='100%%' style='max-height:280px;object-fit:contain;background:#fff'></a>"
-            "<div class='card-body'><p class='card-text'>%s</p>"
-            "<div class='d-flex justify-content-between align-items-center'><div class='btn-group'>"
-            "<a class='btn btn-sm btn-outline-secondary' href='/file/%s' target='_blank'>Open</a>"
-            "<button class='btn btn-sm btn-outline-secondary' onclick='MyDelete(%lld,this)'>Delete</button>"
-            "</div><small><span class='doc-date' data-id='%lld' style='cursor:pointer'></span></small></div>"
-            "<div class='mt-2' data-tag-container><div class='d-flex flex-wrap gap-1 align-items-center'>",
-            d->id, t ? t : "", t ? t : "", t ? t : "", t ? t : "", d->id, d->id);
+        char *badges_html = NULL;
+        size_t badges_len = 0, badges_cap = 0;
 
         char **tagarr = NULL;
         size_t tagcnt = 0;
         split_sort_tags(d->tags, &tagarr, &tagcnt);
         for (size_t ti = 0; ti < tagcnt; ti++) {
             char *te = html_escape(tagarr[ti]);
-            sb_appendf(&buf, &len, &cap,
-                "<span class='tag-badge'><span onclick=\"searchTag('%s')\" style='cursor:pointer'>%s</span>"
-                "<button class='tag-remove' onclick=\"removeTag('%lld','%s',this);event.stopPropagation();\">&#215;</button></span>",
-                te ? te : "", te ? te : "", d->id, te ? te : "");
+            KVList v;
+            kvl_init(&v);
+            kvl_add(&v, "DOC_ID", id_buf);
+            kvl_add(&v, "TAG", te ? te : "");
+            char *frag = render_template_string("_tag_badge.html", &v);
+            if (frag) {
+                sb_append_str(&badges_html, &badges_len, &badges_cap, frag);
+                free(frag);
+            }
+            kvl_free(&v);
             free(te);
         }
         free_str_array(tagarr, tagcnt);
 
+        char *stamps_html = NULL;
+        size_t stamps_len = 0, stamps_cap = 0;
         for (size_t si = 0; si < stamps_n; si++) {
             char *se = html_escape(stamps[si]);
-            sb_appendf(&buf, &len, &cap,
-                "<button class='tag-stamp' data-stamp-tag='%s' onclick=\"applyStamp('%lld','%s',this)\">%s</button>",
-                se ? se : "", d->id, se ? se : "", se ? se : "");
+            KVList v;
+            kvl_init(&v);
+            kvl_add(&v, "DOC_ID", id_buf);
+            kvl_add(&v, "STAMP", se ? se : "");
+            char *frag = render_template_string("_stamp_button.html", &v);
+            if (frag) {
+                sb_append_str(&stamps_html, &stamps_len, &stamps_cap, frag);
+                free(frag);
+            }
+            kvl_free(&v);
             free(se);
         }
-        sb_appendf(&buf, &len, &cap,
-            "<input type='text' class='tag-add-input' placeholder='+ tag' style='display:none' data-tag-input>"
-            "<button class='tag-badge' onclick='showTagInput(this)' data-tag-add-btn>+</button>"
-            "</div><div><button class='btn btn-link btn-sm p-0 mt-1' onclick=\"toggleHistory('%lld',this);return false;\">history</button>"
-            "<div class='small text-muted mt-1' style='display:none' data-history-panel></div></div></div></div></div></div>",
-            d->id);
+
+        KVList cardv;
+        kvl_init(&cardv);
+        kvl_add(&cardv, "DOC_ID", id_buf);
+        kvl_add(&cardv, "TITLE", t ? t : "");
+        kvl_add(&cardv, "TAG_BADGES", badges_html ? badges_html : "");
+        kvl_add(&cardv, "STAMP_BUTTONS", stamps_html ? stamps_html : "");
+        char *card = render_template_string("_doc_card.html", &cardv);
+        if (card) {
+            sb_append_str(&buf, &len, &cap, card);
+            free(card);
+        }
+        kvl_free(&cardv);
+
+        free(badges_html);
+        free(stamps_html);
         free(t);
     }
 
@@ -2094,6 +2163,7 @@ static void route_request(const Request *req, Response *resp, char *extra_header
         char rel[PATH_MAX];
         snprintf(rel, sizeof(rel), "public%s", req->path);
         handle_static_file(rel, resp);
+        set_cache_headers_for_path(req->path, extra_headers, extra_n);
         return;
     }
 
@@ -2135,6 +2205,7 @@ static void route_request(const Request *req, Response *resp, char *extra_header
 
         if (strcmp(req->method, "GET") == 0) {
             handle_file_download(p, resp);
+            set_cache_headers_for_path(p, extra_headers, extra_n);
             return;
         }
     }

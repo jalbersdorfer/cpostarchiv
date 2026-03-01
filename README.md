@@ -53,6 +53,9 @@ HTML is file-based and loaded from `TEMPLATE_DIR` (default `./views`):
 - `views/index.html`
 - `views/upload.html`
 - `views/admin.html`
+- `views/_doc_card.html`
+- `views/_tag_badge.html`
+- `views/_stamp_button.html`
 
 Template engine implementation is isolated from the app server:
 
@@ -62,6 +65,9 @@ Template engine implementation is isolated from the app server:
 Template placeholders use `{{NAME}}`:
 
 - `index.html`: `{{QUERY}}`, `{{RESULT_COUNT}}`, `{{SEARCH_LABEL}}`, `{{DOCS_HTML}}`
+- `_doc_card.html`: `{{DOC_ID}}`, `{{TITLE}}`, `{{TAG_BADGES}}`, `{{STAMP_BUTTONS}}`
+- `_tag_badge.html`: `{{DOC_ID}}`, `{{TAG}}`
+- `_stamp_button.html`: `{{DOC_ID}}`, `{{STAMP}}`
 - `admin.html`: `{{DOC_COUNT}}`
 
 ## MySQL Probe (standalone)
